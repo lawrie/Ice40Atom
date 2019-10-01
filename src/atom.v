@@ -25,35 +25,30 @@
 
 module atom
    (
-             // Main clock, 100MHz
-             input         clk100,
-             // ARM SPI slave, to bootstrap load the ROMS
-             inout         arm_ss,
-             inout         arm_sclk,
-             inout         arm_mosi,
-             output        arm_miso,
+             // Main clock, 25MHz
+             input         clk25,
+	     // flashmem
+             output flash_sck,
+             output flash_csn,
+             output flash_mosi,
+             input flash_miso,
              // SD Card SPI master
              output        ss,
              output        sclk,
              output        mosi,
              input         miso,
              // Switches
-             input         sw4,
-             // External RAM
-             output        RAMWE_b,
-             output        RAMOE_b,
-             output        RAMCS_b,
-`ifdef blackice2
-             output        RAMLB_b,
-             output        RAMUB_b,
-             // Global internal reset connected to RTS on ch340 and also PMOD[1]
-             input         greset,
-             // Input lines from STM32/Done can be used to signal to Ice40 logic
-             input         DONE, // could be used as interupt in post programming
-             input         DBG1, // Could be used to select coms via STM32 or RPi etc..
-`endif
-             output [17:0] ADR,
-             inout [7:0]   DAT,
+             input         button,
+             inout      [15:0] sd_data,    // 16 bit bidirectional data bus
+             output     [10:0] sd_addr,    // 11 bit multiplexed address bus
+             output     [1:0]  sd_dqm,     // two byte masks
+             output     [0:0]  sd_ba,      // two banks
+             output            sd_cs,      // a single chip select
+             output            sd_we,      // write enable
+             output            sd_ras,     // row address select
+             output            sd_cas,     // columns address select
+             output            sd_cke,     // clock enable
+             output            sd_clk,     // sdram clock
              // Cassette / Sound
              input         cas_in,
              output        cas_out,
@@ -66,7 +61,10 @@ module atom
              output [3:0]  green,
              output [3:0]  blue,
              output        hsync,
-             output        vsync
+             output        vsync,
+
+	     output      [2:0] leds,
+	     output reg [15:0] diag
              );
 
    // ===============================================================
@@ -82,7 +80,6 @@ module atom
    // ===============================================================
 
    reg         hard_reset_n;
-   wire        booting;
    wire        break_n;
    reg [7:0]   pia_pa_r = 8'h00;
    reg         rnw;
@@ -99,18 +96,6 @@ module atom
    reg         lock;
 
    // ===============================================================
-   // System Clock generation (25MHz)
-   // ===============================================================
-
-   reg [1:0]  clkpre = 2'b00;     // prescaler, from 100MHz to 25MHz
-
-   always @(posedge clk100)
-     begin
-        clkpre <= clkpre + 1;
-     end
-   wire clk25 = clkpre[1];
-
-   // ===============================================================
    // VGA Clock generation (25MHz/12.5MHz)
    // ===============================================================
 
@@ -124,13 +109,14 @@ module atom
    // Clock Enable Generation
    // ===============================================================
 
-   reg       cpu_clken;
-   reg       cpu_clken1;
-   reg       via1_clken;
-   reg       via4_clken;
-   reg       wegate_b;
-   reg [4:0] clkdiv = 5'b00000;  // divider, from 25MHz down to 1, 2, 4 or 8MHz
+   //reg       cpu_clken;
+   //reg       cpu_clken1;
+   //reg       via1_clken;
+   //reg       via4_clken;
+   //reg       wegate_b;
+   //reg [4:0] clkdiv = 5'b00000;  // divider, from 25MHz down to 1, 2, 4 or 8MHz
 
+   /*
    always @(posedge clk25) begin
       if (clkdiv == 24)
         clkdiv <= 0;
@@ -158,30 +144,182 @@ module atom
       endcase
       cpu_clken1 <= cpu_clken;
    end
+   */
+  
+   reg [6:0] clkdiv;
+   reg sync, cpu_clken, via1_clken, via4_clken, cpu_clken1, wegate_b;
+
+   always @(posedge clk64) begin
+     clkdiv <= clkdiv + 1;
+     cpu_clken1 <= cpu_clken;
+     cpu_clken <= (clkdiv == 0);
+     sync <= (clkdiv[2:0] == 0);
+     via1_clken <= (clkdiv == 0);
+     via4_clken <= (clkdiv[1:0] == 0);
+   end
 
    // Delay wegate_b by a whole cycle to provide lots of margin
    // (4MHz: one cycle = 40ns setup time and two cycles = 80ns hold time)
-   always @(posedge clk25)
+   always @(posedge clk64)
       wegate_b <= !cpu_clken1;
 
    // ===============================================================
    // Reset generation
    // ===============================================================
 
-   reg [9:0] pwr_up_reset_counter = 0; // hold reset low for ~1ms
+   reg [10:0] pwr_up_reset_counter = 0; // hold reset low for ~1ms
    wire      pwr_up_reset_n = &pwr_up_reset_counter;
 
-   always @(posedge clk25)
+   always @(posedge clk64)
      begin
         if (cpu_clken)
           begin
              if (!pwr_up_reset_n)
                pwr_up_reset_counter <= pwr_up_reset_counter + 1;
-             hard_reset_n <= sw4 & pwr_up_reset_n;
+             hard_reset_n <= pwr_up_reset_n;
           end
      end
 
-   wire reset = !hard_reset_n | !break_n | booting;
+
+   wire reset = !hard_reset_n | !break_n | !load_done;
+
+   reg reload;
+   reg btn_dly;
+
+   always @ (posedge clk64) begin
+     btn_dly <= button;
+     reload <= button && !btn_dly;
+   end
+
+   // Pll for SDRAM clock
+   wire clk64, locked;
+   pll pll_i (
+     .clock_in(clk25),
+     .clock_out(clk64),
+     .locked(locked)
+   );
+
+   // Use SB_IO for tristate sd_data
+   wire [15:0] sd_data_in;
+   reg  [15:0] sd_data_out;
+   reg         sd_data_dir;
+
+   SB_IO #(
+     .PIN_TYPE(6'b 1010_01),
+     .PULLUP(1'b 0)
+   ) ram [15:0] (
+     .PACKAGE_PIN(sd_data),
+     .OUTPUT_ENABLE(sd_data_dir),
+     .D_OUT_0(sd_data_out),
+     .D_IN_0(sd_data_in)
+   );
+
+   assign sd_cke = 1;
+   assign sd_clk = clk64;
+
+   wire [15:0] sdram_address = load_done ? atom_RAMA[17:1] : (16'h6000 + load_addr[15:0]);
+   wire        sdram_wren = load_done ? (!cpu_clken && !atom_RAMWE_b) : load_wren;
+   wire [15:0] sdram_write_data = load_done ? {cpu_dout, cpu_dout} : load_write_data;
+   wire [15:0] sdram_read_data;
+   wire  [1:0] sdram_mask = load_done ? (2'b01 << atom_RAMA[0]) : 2'b11;
+
+   sdram ram(
+    .sd_data_in(sd_data_in),
+    .sd_data_out(sd_data_out),
+    .sd_data_dir(sd_data_dir),
+    .sd_addr(sd_addr),
+    .sd_dqm(sd_dqm),
+    .sd_ba(sd_ba),
+    .sd_cs(sd_cs),
+    .sd_we(sd_we),
+    .sd_ras(sd_ras),
+    .sd_cas(sd_cas),
+    .clk(clk64),
+    .init(!locked || reload),
+    .sync(sync),
+    .ds(sdram_mask),
+    .we(sdram_wren),
+    .oe(load_done && !cpu_clken && !atom_RAMOE_b),
+    .addr({4'b0, sdram_address}),
+    .din(sdram_write_data),
+    .dout(sdram_read_data)
+   );
+
+   reg         load_done;
+   reg  [15:0] load_addr;
+   reg  [1:0]  sdram_written = 0;
+   wire [15:0] load_write_data;
+
+   reg         flashmem_valid;
+   wire        flashmem_ready;
+   wire        load_wren =  sdram_written > 1;
+   wire [23:0] flashmem_addr = 24'h70000 | {load_addr, 1'b0};
+   reg         load_done_pre;
+   reg [7:0]   wait_ctr;
+
+   // Flash memory load interface
+   always @(posedge clk64)
+   begin
+     diag <= sdram_read_data;
+     //diag <= sdram_read_data;
+     if (!hard_reset_n) begin
+       load_done_pre <= 1'b0;
+       load_done <= 1'b0;
+       load_addr <= 17'h1ffff;
+       wait_ctr <= 8'h00;
+       flashmem_valid <= 1;
+     end else begin
+     if (reload) begin
+       load_done_pre <= 1'b0;
+       load_done <= 1'b0;
+       load_addr <= 17'h0000;
+       wait_ctr <= 8'h00;
+       flashmem_valid <= 1;
+     end else if (!load_done) begin
+       if (sdram_written > 0 && sdram_written < 3) begin
+         if (sync) sdram_written <= sdram_written + 1;
+         if (sdram_written == 2 && sync) begin
+           if (load_addr == 17'h1fff) begin
+             load_done_pre <= 1'b1;
+           end else begin
+             load_addr <= load_addr + 1'b1;
+             flashmem_valid <= 1;
+             sdram_written <= 0;
+           end
+         end
+       end
+       if(!load_done_pre) begin
+         if (flashmem_ready == 1'b1) begin
+           flashmem_valid <= 0;
+           sdram_written <= 1;
+           //if (load_addr == 16'h1ffe) diag <= load_write_data;
+         end
+       end else begin
+         if (wait_ctr < 8'hFF)
+           wait_ctr <= wait_ctr + 1;
+         else
+           load_done <= 1'b1;
+         end
+       end
+     end
+   end
+
+   // ==============================================================
+   // Flash memory
+   // ==============================================================
+   icosoc_flashmem flash_i (
+     .clk(clk64),
+     .reset(!hard_reset_n || reload),
+     .valid(flashmem_valid && !load_done),
+     .ready(flashmem_ready),
+     .addr(flashmem_addr),
+     .rdata(load_write_data),
+
+     .spi_cs(flash_csn),
+     .spi_sclk(flash_sck),
+     .spi_mosi(flash_mosi),
+     .spi_miso(flash_miso)
+   );
 
    // ===============================================================
    // Keyboard
@@ -197,7 +335,7 @@ module atom
 
    keyboard KBD
      (
-      .CLK(clk25),
+      .CLK(clk64),
       .nRESET(hard_reset_n),
       .PS2_CLK(ps2_clk_int),
       .PS2_DATA(ps2_data_int),
@@ -227,12 +365,16 @@ module atom
    // LEDs
    // ===============================================================
 
+   assign leds[0] = !load_done;
+   assign leds[1] = !hard_reset_n;
+   assign leds[2] = !reload;
+
    reg        led1;
    reg        led2;
    reg        led3;
    reg        led4;
 
-   always @(posedge clk25)
+   always @(posedge clk64)
      begin
         led1 <= pia_pc[3];  // blue    - indicates alt colour set active
         led2 <= !ss;        // green   - indicates SD card activity
@@ -251,7 +393,7 @@ module atom
    reg        cas_tone = 1'b0;
    reg [7:0]  cas_div = 0;
 
-   always @(posedge clk25)
+   always @(posedge clk64)
      if (cpu_clken)
        begin
           if (cas_div == 207)
@@ -277,7 +419,7 @@ module atom
    wire        rom_latch_cs;
    wire        a000_cs;
 
-   always @(posedge clk25 or posedge reset)
+   always @(posedge clk64 or posedge reset)
      if (reset)
        rom_latch <= 8'h00;
      else if (cpu_clken)
@@ -285,110 +427,13 @@ module atom
          rom_latch <= cpu_dout;
 
    // ===============================================================
-   // Bootstrap (of ROM content from ARM into RAM )
+   // RAM atrributes
    // ===============================================================
 
-   wire        atom_RAMCS_b = 1'b0;
    wire        atom_RAMOE_b = !rnw;
-   wire        atom_RAMWE_b = rnw  | wegate_b | wemask;
+   wire        atom_RAMWE_b = rnw  | wemask;
    wire [17:0] atom_RAMA    = a000_cs ? { 3'b010, rom_latch[2:0], address[11:0] } :
                                         { 2'b00, address };
-   wire [7:0]  atom_RAMDin  = cpu_dout;
-
-   wire        ext_RAMCS_b;
-   wire        ext_RAMOE_b;
-   wire        ext_RAMWE_b;
-   wire [17:0] ext_RAMA;
-   wire [7:0]  ext_RAMDin;
-
-   wire        arm_ss_int;
-   wire        arm_mosi_int;
-   wire        arm_miso_int;
-   wire        arm_sclk_int;
-
-`ifdef blackice2
-   assign RAMLB_b = 1'b0;
-   assign RAMUB_b = 1'b0;
-`endif
-
-   bootstrap BS
-     (
-      .clk(clk100),
-      .booting(booting),
-      .progress(),
-      // SPI Slave Interface (runs at 20MHz)
-      .SCK(arm_sclk_int),
-      .SSEL(arm_ss_int),
-      .MOSI(arm_mosi_int),
-      .MISO(arm_miso_int),
-      // RAM from Atom
-      .atom_RAMCS_b(atom_RAMCS_b),
-      .atom_RAMOE_b(atom_RAMOE_b),
-      .atom_RAMWE_b(atom_RAMWE_b),
-      .atom_RAMA(atom_RAMA),
-      .atom_RAMDin(atom_RAMDin),
-      // RAM to external SRAM
-      .ext_RAMCS_b(ext_RAMCS_b),
-      .ext_RAMOE_b(ext_RAMOE_b),
-      .ext_RAMWE_b(ext_RAMWE_b),
-      .ext_RAMA(ext_RAMA),
-      .ext_RAMDin(ext_RAMDin)
-   );
-
-   // ===============================================================
-   // ARM SPI Port / LED multiplexor
-   // ===============================================================
-
-   // FPGA -> ARM signals
-   assign arm_miso = booting ? arm_miso_int : led2;
-
-   // ARM -> FPGA signals
-`ifdef use_sb_io
-   SB_IO
-     #(
-       .PIN_TYPE(6'b 1010_01)
-       )
-   arm_spi_pins [2:0]
-     (
-      .PACKAGE_PIN({arm_ss, arm_mosi, arm_sclk}),
-      .OUTPUT_ENABLE(!booting),
-      .D_OUT_0({led1, led3, led4}),
-      .D_IN_0({arm_ss_int, arm_mosi_int, arm_sclk_int})
-      );
-`else
-   assign {arm_ss, arm_mosi, arm_sclk} = booting ? 3'bZ : {led1, led2, led4};
-   assign {arm_ss_int, arm_mosi_int, arm_sclk_int} = {arm_ss, arm_mosi, arm_sclk};
-`endif
-
-   // ===============================================================
-   // External RAM
-   // ===============================================================
-
-   assign RAMCS_b = ext_RAMCS_b;
-   assign RAMOE_b = ext_RAMOE_b;
-   assign RAMWE_b = ext_RAMWE_b;
-   assign ADR     = ext_RAMA;
-
-`ifdef use_sb_io
-   // IceStorm cannot infer bidirectional I/Os
-   wire [7:0] data_pins_in;
-   wire [7:0] data_pins_out = ext_RAMDin;
-   wire       data_pins_out_en = !ext_RAMWE_b;
-   SB_IO
-     #(
-       .PIN_TYPE(6'b 1010_01)
-       )
-   sram_data_pins [7:0]
-     (
-      .PACKAGE_PIN(DAT),
-      .OUTPUT_ENABLE(data_pins_out_en),
-      .D_OUT_0(data_pins_out),
-      .D_IN_0(data_pins_in)
-      );
-`else
-   assign DAT = (ext_RAMWE_b) ? 8'bz : ext_RAMDin;
-   wire [7:0] data_pins_in = DAT;
-`endif
 
    // ===============================================================
    // SID
@@ -400,9 +445,9 @@ module atom
 
    sid6581 sid
      (
-      .clk_1MHz(!clkdiv[4]),
+      .clk_1MHz(!clkdiv[6]),
       .clk32(clk25), // TODO: should be clk32
-      .clk_DAC(clk100),
+      .clk_DAC(clk64),
       .reset(reset),
       .cs(cpu_clken),
       .we(sid_cs & !rnw),
@@ -431,7 +476,7 @@ module atom
    wire [7:0] pia_pb   = { shift_n, ctrl_n, keyout };
    assign     pia_pc   = { fs_n, rept_n, cas_in, cas_tone, pia_pc_r};
 
-   always @(posedge clk25 or posedge reset)
+   always @(posedge clk64 or posedge reset)
      begin
         if (reset)
           begin
@@ -473,7 +518,7 @@ module atom
    // Arlet's 6502 core is one of the smallest available
    cpu CPU
      (
-      .clk(clk25),
+      .clk(clk64),
       .reset(reset),
       .AB(address_c),
       .DI(cpu_din),
@@ -485,7 +530,7 @@ module atom
       );
 
    // The outputs of Arlets's 6502 core need registing
-   always @(posedge clk25)
+   always @(posedge clk64)
      begin
         if (cpu_clken)
           begin
@@ -496,7 +541,7 @@ module atom
      end
 
    // Snoop bit 5 of #E7 (the lock flag)
-   always @(posedge clk25 or posedge reset)
+   always @(posedge clk64 or posedge reset)
      if (reset)
        lock <= 1'b0;
      else if (cpu_clken)
@@ -546,7 +591,7 @@ module atom
                     via_cs   ? via_dout  :
                     sid_cs   ? sid_dout  :
               rom_latch_cs   ? rom_latch :
-                               data_pins_in;
+                               (address[0] ? sdram_read_data[15:8] : sdram_read_data[7:0]);
 
    // ===============================================================
    // 6522 VIA at 0xB8xx
@@ -581,7 +626,7 @@ module atom
       .I_P2_H(via1_clken),
       .RESET_L(!reset),
       .ENA_4(via4_clken),
-      .CLK(clk25)
+      .CLK(clk64)
       );
 
    // ===============================================================
@@ -590,7 +635,7 @@ module atom
 
    spi SPI
      (
-      .clk(clk25),
+      .clk(clk64),
       .reset(reset),
       .enable(spi_cs & cpu_clken),
       .rnw(rnw),
@@ -621,7 +666,7 @@ module atom
    VID_RAM
      (
       // Port A
-      .clk_a(clk25),
+      .clk_a(clk64),
       .we_a(we_a),
       .addr_a(address[12:0]),
       .din_a(cpu_dout),

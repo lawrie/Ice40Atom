@@ -4,6 +4,7 @@ not_in_git/
 # IceStorm files
 atom.bin
 atom.blif
+atom.json
 atom.log
 atom.txt
 # Simulation files
