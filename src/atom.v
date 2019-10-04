@@ -261,11 +261,10 @@ module atom
    always @(posedge clk64)
    begin
      diag <= sdram_read_data;
-     //diag <= sdram_read_data;
      if (!hard_reset_n) begin
        load_done_pre <= 1'b0;
        load_done <= 1'b0;
-       load_addr <= 17'h1ffff;
+       load_addr <= 17'h00000;
        wait_ctr <= 8'h00;
        flashmem_valid <= 1;
      end else begin

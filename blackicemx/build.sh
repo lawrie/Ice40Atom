@@ -7,5 +7,5 @@ SRCS="../src/atom.v ../src/cpu.v ../src/ALU.v ../src/rom_c000_f000.v ../src/mc68
 
 yosys -q -f "verilog -Dblackicmx -Duse_sb_io" -l ${NAME}.log -p "synth_ice40 -top ${TOP} -abc2 -json ${NAME}.json" ${SRCS}
 nextpnr-ice40 --hx8k --package ${PACKAGE} --pcf blackice.pcf --json ${NAME}.json --asc ${NAME}.txt --placer heap
-icepack -s ${NAME}.txt ${NAME}.bin
+icepack ${NAME}.txt ${NAME}.bin
 icetime -d hx8k -P ${PACKAGE} ${NAME}.txt
