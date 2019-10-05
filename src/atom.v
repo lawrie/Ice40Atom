@@ -4,6 +4,7 @@
 // An Acorn Atom implementation for the Ice40
 //
 // Copyright (C) 2017 David Banks
+// Modified by Lawrie Griffiths for Blackice Mx
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,10 +19,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 // =======================================================================
-
-// The IceStorm sythesis scripts defines use_sb_io to force
-// the instantaion of SB_IO (as inferrence broken)
-// `define use_sb_io
 
 module atom
    (
@@ -76,30 +73,30 @@ module atom
 
    // ===============================================================
    // Wires/Reg definitions
-   // TODO: reorganize so all defined here
    // ===============================================================
 
    reg         hard_reset_n;
-   wire        break_n;
    reg [7:0]   pia_pa_r = 8'h00;
    reg         rnw;
-   wire [7:0]  pia_pc;
-   wire        pia_cs;
-   wire        wemask;
    reg [15:0]  address;
    reg [7:0]   cpu_dout;
    reg [7:0]   vid_dout;
+   reg         lock;
+
+   wire        break_n;
+   wire [7:0]  pia_pc;
+   wire        pia_cs;
+   wire        wemask;
    wire [7:0]  spi_dout;
    wire [7:0]  via_dout;
    wire        via_irq_n;
    wire [1:0]  turbo;
-   reg         lock;
 
    // ===============================================================
    // VGA Clock generation (25MHz/12.5MHz)
    // ===============================================================
 
-   wire clk_vga = clk25;
+   wire clk_vga = clk32;
    reg  clk_vga_en = 0;
 
    always @(posedge clk_vga)
@@ -109,66 +106,27 @@ module atom
    // Clock Enable Generation
    // ===============================================================
 
-   //reg       cpu_clken;
-   //reg       cpu_clken1;
-   //reg       via1_clken;
-   //reg       via4_clken;
-   //reg       wegate_b;
-   //reg [4:0] clkdiv = 5'b00000;  // divider, from 25MHz down to 1, 2, 4 or 8MHz
-
-   /*
-   always @(posedge clk25) begin
-      if (clkdiv == 24)
-        clkdiv <= 0;
-      else
-        clkdiv <= clkdiv + 1;
-      case (turbo)
-        2'b00: // 1MHz
-          begin
-             cpu_clken  <= (clkdiv[3:0] == 0) & (clkdiv[4] == 0);
-             via1_clken <= (clkdiv[3:0] == 0) & (clkdiv[4] == 0);
-             via4_clken <= (clkdiv[1:0] == 0) & (clkdiv[4] == 0);
-          end
-        2'b01: // 2MHz
-          begin
-             cpu_clken  <= (clkdiv[2:0] == 0) & (clkdiv[4] == 0);
-             via1_clken <= (clkdiv[2:0] == 0) & (clkdiv[4] == 0);
-             via4_clken <= (clkdiv[0]   == 0) & (clkdiv[4] == 0);
-          end
-        default: // 4MHz
-          begin
-             cpu_clken  <= (clkdiv[1:0] == 0) & (clkdiv[4] == 0);
-             via1_clken <= (clkdiv[1:0] == 0) & (clkdiv[4] == 0);
-             via4_clken <=                      (clkdiv[4] == 0);
-          end
-      endcase
-      cpu_clken1 <= cpu_clken;
-   end
-   */
-  
    reg [6:0] clkdiv;
-   reg sync, cpu_clken, via1_clken, via4_clken, cpu_clken1, wegate_b;
+   reg sync, cpu_clken, via1_clken, via4_clken;
+   reg sdram_access;
+   reg clk32;
 
    always @(posedge clk64) begin
      clkdiv <= clkdiv + 1;
-     cpu_clken1 <= cpu_clken;
      cpu_clken <= (clkdiv == 0);
+     sdram_access <= (clkdiv >= 8 && clkdiv < 16);
      sync <= (clkdiv[2:0] == 0);
      via1_clken <= (clkdiv == 0);
      via4_clken <= (clkdiv[1:0] == 0);
+     clk32 <= clkdiv[0];
    end
-
-   // Delay wegate_b by a whole cycle to provide lots of margin
-   // (4MHz: one cycle = 40ns setup time and two cycles = 80ns hold time)
-   always @(posedge clk64)
-      wegate_b <= !cpu_clken1;
 
    // ===============================================================
    // Reset generation
    // ===============================================================
 
    reg [10:0] pwr_up_reset_counter = 0; // hold reset low for ~1ms
-   wire      pwr_up_reset_n = &pwr_up_reset_counter;
+   wire       pwr_up_reset_n = &pwr_up_reset_counter;
 
    always @(posedge clk64)
      begin
@@ -218,11 +176,12 @@ module atom
    assign sd_clk = clk64;
 
    wire [15:0] sdram_address = load_done ? atom_RAMA[17:1] : (16'h6000 + load_addr[15:0]);
-   wire        sdram_wren = load_done ? (!cpu_clken && !atom_RAMWE_b) : load_wren;
+   wire        sdram_wren = load_done ? (sdram_access && !atom_RAMWE_b) : load_wren;
    wire [15:0] sdram_write_data = load_done ? {cpu_dout, cpu_dout} : load_write_data;
    wire [15:0] sdram_read_data;
    wire  [1:0] sdram_mask = load_done ? (2'b01 << atom_RAMA[0]) : 2'b11;
 
+   // SDRAM
    sdram ram(
     .sd_data_in(sd_data_in),
     .sd_data_out(sd_data_out),
@@ -239,7 +198,7 @@ module atom
     .sync(sync),
     .ds(sdram_mask),
     .we(sdram_wren),
-    .oe(load_done && !cpu_clken && !atom_RAMOE_b),
+    .oe(load_done && sdram_access && !atom_RAMOE_b),
     .addr({4'b0, sdram_address}),
     .din(sdram_write_data),
     .dout(sdram_read_data)
@@ -347,7 +306,6 @@ module atom
       .TURBO(turbo)
       );
 
-`ifdef use_sb_io
     SB_IO #(
         .PIN_TYPE(6'b0000_01),
         .PULLUP(1'b1)
@@ -355,10 +313,6 @@ module atom
         .PACKAGE_PIN({ps2_clk, ps2_data}),
         .D_IN_0({ps2_clk_int, ps2_data_int})
     );
-`else
-   assign ps2_clk_int = ps2_clk;
-   assign ps2_data_int = ps2_data;
-`endif
 
    // ===============================================================
    // LEDs
@@ -690,7 +644,7 @@ module atom
    // and neither the VGD or the CPU require the read to happen
    // immediately.
 
-   always @(posedge clk_vga, posedge reset)
+   always @(posedge clk64, posedge reset)
      begin
         if (reset)
           rd_state <= 2'b00;
