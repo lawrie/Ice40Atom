@@ -32,9 +32,17 @@ module sdram
 	input      [15:0] sd_data_in, // 16 bit bidirectional data bus
 	output     [15:0] sd_data_out,
 	output            sd_data_dir,
+`ifdef ulx3s
+	output reg [12:0] sd_addr,    // 11 bit multiplexed address bus
+`else
 	output reg [10:0] sd_addr,    // 11 bit multiplexed address bus
+`endif
 	output reg [1:0]  sd_dqm,     // two byte masks
+`ifdef ulx3s
+	output reg [1:0]  sd_ba,      // two banks
+`else
 	output reg [0:0]  sd_ba,      // two banks
+`endif
 	output 		  sd_cs,      // a single chip select
 	output 		  sd_we,      // write enable
 	output 		  sd_ras,     // row address select

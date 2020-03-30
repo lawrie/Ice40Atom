@@ -24,8 +24,15 @@ module atom
    (
              // Main clock, 25MHz
              input         clk25,
+`ifdef ulx3s
+             output usb_fpga_pu_dp,
+             output usb_fpga_pu_dn,
+`endif	   
 	     // flashmem
+`ifdef ulx3s
+`else
              output flash_sck,
+`endif
              output flash_csn,
              output flash_mosi,
              input flash_miso,
@@ -37,9 +44,17 @@ module atom
              // Switches
              input         button,
              inout      [15:0] sd_data,    // 16 bit bidirectional data bus
+`ifdef ulx3s
+             output     [12:0] sd_addr,    // 11 bit multiplexed address bus
+`else
              output     [10:0] sd_addr,    // 11 bit multiplexed address bus
+`endif
              output     [1:0]  sd_dqm,     // two byte masks
+`ifdef ulx3s
+             output     [1:0]  sd_ba,      // two banks
+`else
              output     [0:0]  sd_ba,      // two banks
+`endif
              output            sd_cs,      // a single chip select
              output            sd_we,      // write enable
              output            sd_ras,     // row address select
@@ -61,8 +76,11 @@ module atom
              output        vsync,
 
 	     output      [2:0] leds,
-	     output reg [15:0] diag
+	     //output reg [15:0] diag
+	     output      [15:0] diag
              );
+
+	     assign diag = 16'h1234;
 
    // ===============================================================
    // Parameters
@@ -92,12 +110,24 @@ module atom
    wire        via_irq_n;
    wire [1:0]  turbo;
 
+`ifdef ulx3s
+   assign usb_fpga_pu_dp = 1;
+   assign usb_fpga_pu_dn = 1;
+`endif
+
    // ===============================================================
    // VGA Clock generation (25MHz/12.5MHz)
    // ===============================================================
 
    wire clk_vga = clk32;
    reg  clk_vga_en = 0;
+
+`ifdef ulx3s
+   wire flash_sck;
+   wire tristate = 1'b0;
+
+   USRMCLK u1 (.USRMCLKI(flash_sck), .USRMCLKTS(tristate));
+`endif
 
    always @(posedge clk_vga)
      clk_vga_en <= !clk_vga_en;
@@ -106,7 +136,7 @@ module atom
    // Clock Enable Generation
    // ===============================================================
 
-   reg [6:0] clkdiv;
+   reg [5:0] clkdiv;
    reg sync, cpu_clken, via1_clken, via4_clken;
    reg sdram_access;
    reg clk32;
@@ -151,17 +181,27 @@ module atom
 
    // Pll for SDRAM clock
    wire clk64, locked;
+
+`ifdef ulx3s
+   pll pll_i (
+     .clkin(clk25),
+     .clkout0(clk64),
+     .locked(locked)
+   );
+`else
    pll pll_i (
      .clock_in(clk25),
      .clock_out(clk64),
      .locked(locked)
    );
+ `endif
 
    // Use SB_IO for tristate sd_data
    wire [15:0] sd_data_in;
    reg  [15:0] sd_data_out;
    reg         sd_data_dir;
 
+`ifdef use_sb_io
    SB_IO #(
      .PIN_TYPE(6'b 1010_01),
      .PULLUP(1'b 0)
@@ -171,6 +211,10 @@ module atom
      .D_OUT_0(sd_data_out),
      .D_IN_0(sd_data_in)
    );
+`else 
+   assign sd_data = sd_data_dir ? sd_data_out : 16'hzzzz;
+   assign sd_data_in = sd_data; 
+`endif
 
    assign sd_cke = 1;
    assign sd_clk = clk64;
@@ -219,7 +263,7 @@ module atom
    // Flash memory load interface
    always @(posedge clk64)
    begin
-     diag <= sdram_read_data;
+     //diag <= sdram_read_data;
      if (!hard_reset_n) begin
        load_done_pre <= 1'b0;
        load_done <= 1'b0;
@@ -306,6 +350,7 @@ module atom
       .TURBO(turbo)
       );
 
+`ifdef use_sb_io
     SB_IO #(
         .PIN_TYPE(6'b0000_01),
         .PULLUP(1'b1)
@@ -313,6 +358,10 @@ module atom
         .PACKAGE_PIN({ps2_clk, ps2_data}),
         .D_IN_0({ps2_clk_int, ps2_data_int})
     );
+`else
+    assign ps2_clk_int = ps2_clk;
+    assign ps2_data_int = ps2_data;
+`endif
 
    // ===============================================================
    // LEDs
@@ -398,7 +447,7 @@ module atom
 
    sid6581 sid
      (
-      .clk_1MHz(!clkdiv[6]),
+      .clk_1MHz(!clkdiv[5]),
       .clk32(clk25), // TODO: should be clk32
       .clk_DAC(clk64),
       .reset(reset),
@@ -644,7 +693,7 @@ module atom
    // and neither the VGD or the CPU require the read to happen
    // immediately.
 
-   always @(posedge clk64, posedge reset)
+   always @(posedge clk32, posedge reset)
      begin
         if (reset)
           rd_state <= 2'b00;
