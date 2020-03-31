@@ -55,7 +55,11 @@ module sdram
 
 	input      [15:0] din,	      // data input from chipset/cpu
 	output reg [15:0] dout,	      // data output to chipset/cpu
+`ifdef ulx3s
+	input      [23:0] addr,       // 20 bit word address
+`else
 	input      [19:0] addr,       // 20 bit word address
+`endif
 	input       [1:0] ds,         // upper/lower data strobe
 	input 		  oe,         // cpu/chipset requests read
 	input 		  we          // cpu/chipset requests write
@@ -168,12 +172,20 @@ always @(posedge clk) begin
 
 				// RAS phase
 				sd_cmd  <= CMD_ACTIVE;
-				sd_addr <= addr[18:8];
-				sd_ba   <= addr[19];
-
+`ifdef ulx3s
+				sd_addr <= {1'b0, addr[19:8]};
+				sd_ba   <= addr[21:20];
+`else
+                                sd_addr <= addr[18:8];
+                                sd_ba   <= addr[19];
+`endif
 				ds_r    <= ds;
 				din_r   <= din;
-				addr_r  <= { 3'b100, addr[7:0] };  // auto precharge
+`ifdef ulx3s
+				addr_r  <= { 4'b0010, addr[22], addr[7:0] };  // auto precharge
+`else
+                                addr_r  <= { 3'b100, addr[7:0] };  // auto precharge
+`endif
 			end
 			else begin
 				sd_cmd <= CMD_AUTO_REFRESH;

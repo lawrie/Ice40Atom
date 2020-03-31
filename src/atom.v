@@ -76,11 +76,8 @@ module atom
              output        vsync,
 
 	     output      [2:0] leds,
-	     //output reg [15:0] diag
-	     output      [15:0] diag
+	     output reg [15:0] diag
              );
-
-	     assign diag = 16'h1234;
 
    // ===============================================================
    // Parameters
@@ -155,7 +152,7 @@ module atom
    // Reset generation
    // ===============================================================
 
-   reg [10:0] pwr_up_reset_counter = 0; // hold reset low for ~1ms
+   reg [15:0] pwr_up_reset_counter = 0; // hold reset low for ~1ms
    wire       pwr_up_reset_n = &pwr_up_reset_counter;
 
    always @(posedge clk64)
@@ -243,7 +240,11 @@ module atom
     .ds(sdram_mask),
     .we(sdram_wren),
     .oe(load_done && sdram_access && !atom_RAMOE_b),
+`ifdef ulx3s
+    .addr({8'b0, sdram_address}),
+`else
     .addr({4'b0, sdram_address}),
+`endif
     .din(sdram_write_data),
     .dout(sdram_read_data)
    );
@@ -263,7 +264,7 @@ module atom
    // Flash memory load interface
    always @(posedge clk64)
    begin
-     //diag <= sdram_read_data;
+     diag <= sdram_read_data;
      if (!hard_reset_n) begin
        load_done_pre <= 1'b0;
        load_done <= 1'b0;
@@ -672,11 +673,21 @@ module atom
       .we_a(we_a),
       .addr_a(address[12:0]),
       .din_a(cpu_dout),
-      //.dout_a(vid_dout),
+`ifdef ulx3s
+      .dout_a(vid_dout),
+`endif	      
       // Port B
       .clk_b(clk_vga),
+`ifdef ulx3s
+      .addr_b(vid_addr[12:0]),
+`else
       .addr_b(rd_state == 2'b10 ? address[12:0] : vid_addr[12:0]),
+`endif
+`ifdef ulx3s
+      .dout_b(vid_data)
+`else
       .dout_b(ram_data)
+`endif
       );
 
    // The follow state machine works a bit like the Atom Noise Killer
@@ -693,6 +704,8 @@ module atom
    // and neither the VGD or the CPU require the read to happen
    // immediately.
 
+`ifdef ulx3s
+`else
    always @(posedge clk32, posedge reset)
      begin
         if (reset)
@@ -727,6 +740,7 @@ module atom
               rd_state <= 2'b00;
           endcase
      end
+`endif
 
    // ===============================================================
    // 6847 VDG

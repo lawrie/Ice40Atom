@@ -4,6 +4,9 @@ module vid_ram (
                 input            we_a,
                 input [12:0]     addr_a,
                 input [7:0]      din_a,
+`ifdef ulx3s
+		output reg [7:0] dout_a,
+`endif
                 // Port B
                 input            clk_b,
                 input [12:0]     addr_b,
@@ -22,6 +25,9 @@ module vid_ram (
      begin
         if (we_a)
           ram[addr_a] <= din_a;
+`ifdef ulx3s
+        dout_a <= ram[addr_a];
+`endif
      end
 
    always @(posedge clk_b)
