@@ -7,6 +7,8 @@ atom.blif
 atom.json
 atom.log
 atom.txt
+atom.bit
+atom.config
 # Simulation files
 dump.vcd
 a.out
